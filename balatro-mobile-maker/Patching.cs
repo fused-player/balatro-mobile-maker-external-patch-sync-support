@@ -138,7 +138,101 @@ internal class Patching
         }
 
         //TODO: Better command line args handling
-        if (Program.ArgsEnableAccessibleSave && AskQuestion("Would you like to apply the external storage patch? (NOT recommended)"))
-            ApplyPatch("conf.lua", "t.window.width = 0", "    t.window.width = 0\n    t.externalstorage = true");
+        if (AskQuestion("Would you like to apply the external storage patch? (Recommended for saving to Documents)"))
+        {
+			string savePatch = @"
+			if love.system.getOS() == 'Android' then
+				local android_save_path = '/storage/emulated/0/Documents/Balatro/game/save/'
+				local internal_save_path = love.filesystem.getSaveDirectory()
+
+				local function ensure_dir(path)
+					os.execute('mkdir -p ""' .. path .. '""')
+				end
+
+				-- Startup import
+				local function import_external()
+					ensure_dir(internal_save_path)
+					os.execute('cp -r ""' .. android_save_path .. '/."" ""' .. internal_save_path .. '/""')
+				end
+
+				import_external()
+
+				-- Fix ghost save.jkr per slot
+				for i = 1, 3 do
+
+					local relative_path = i .. '/save.jkr'
+					
+					local external_path = android_save_path .. i .. '/save.jkr'
+
+					local f = io.open(external_path, 'rb')
+
+					if not f then
+						-- If external file is gone, delete the internal one
+						if love.filesystem.getInfo(relative_path) then
+							love.filesystem.remove(relative_path)
+						end
+					else
+						f:close()
+					end
+				end
+
+				-- Mirror writes
+				local function mirror_file(name)
+					local internal_path = internal_save_path .. '/' .. name
+					local external_path = android_save_path .. name
+					ensure_dir(android_save_path)
+					os.execute('cp ""' .. internal_path .. '"" ""' .. external_path .. '""')
+				end
+
+				local old_write = love.filesystem.write
+				function love.filesystem.write(name, data, size)
+					local success, msg = old_write(name, data, size)
+					if success then mirror_file(name) end
+					return success, msg
+				end
+
+				local old_append = love.filesystem.append
+				function love.filesystem.append(name, data, size)
+					local success, msg = old_append(name, data, size)
+					if success then mirror_file(name) end
+					return success, msg
+				end
+
+				local old_remove = love.filesystem.remove
+				function love.filesystem.remove(name)
+					local success = old_remove(name)
+					if success then
+						os.execute('rm -f ""' .. android_save_path .. '/' .. name .. '""')
+					end
+					return success
+				end
+			end
+			";
+
+            Tools.Log("Applying external storage Lua patch...");
+
+            //apply to main thread
+            File.AppendAllText("Balatro/globals.lua", "\n" + savePatch);
+
+            //apply to save thread
+            string saveManagerPath = "Balatro/engine/save_manager.lua";
+            if (File.Exists(saveManagerPath))
+            {
+                string content = File.ReadAllText(saveManagerPath);
+                string insertionPoint = "require 'love.filesystem'";
+
+                if (content.Contains(insertionPoint))
+                {
+                    content = content.Replace(insertionPoint, insertionPoint + "\n" + savePatch);
+                    File.WriteAllText(saveManagerPath, content);
+                    Tools.Log("Save Thread patched successfully.");
+                }
+                else
+                {
+                    //fallback
+                    File.AppendAllText(saveManagerPath, "\n" + savePatch);
+                }
+            }
+        }
     }
 }
